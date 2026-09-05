@@ -1,0 +1,4 @@
+paths:
+  contracts: contracts
+  artifacts: artifacts
+environment: .env
