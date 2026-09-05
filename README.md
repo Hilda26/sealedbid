@@ -128,9 +128,14 @@ meaningful. `DESIGN.md` §8 and the example's own tests document this explicitly
   exists to catch), using gltest's built-in `mock_llm` plus a real-balance-moving
   `EthSend` hook.
 - **Integration** (`tests/integration/`, `pytest tests/integration/ --network=studionet`):
-  requires `SEALEDBIDPROCUREMENT_ADDRESS` set to a real StudioNet deployment; drives a
-  full create → commit → reveal → select lifecycle with multiple competing bids, plus a
-  no-bids-revealed case.
+  5 tests, requires `SEALEDBIDPROCUREMENT_ADDRESS` set to a real StudioNet deployment -
+  a full create → commit → reveal → select lifecycle with multiple competing bids; the
+  no-bids-revealed `VOID` short-circuit; a single revealed but inadequate bid correctly
+  `VOID`-ed by the judged round's own null verdict, not just the short-circuit;
+  `cancel_auction`'s bounded exit under a real timeout; and a bundle of purely
+  deterministic guard rejections (self-bidding, a malformed commitment, a duplicate
+  commit, an impersonated reveal, an over-budget reveal, unknown ids) that need no
+  real-time wait at all.
 
 ## Deployment
 

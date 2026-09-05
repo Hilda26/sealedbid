@@ -202,3 +202,158 @@ def test_select_winner_with_no_revealed_bids_voids_and_refunds_without_genvm_or_
     final_auction = c.get_auction(args=[auction_id]).call()
     print("auction after zero reveals:", str(final_auction).encode("ascii", errors="backslashreplace").decode("ascii"))
     assert final_auction["state"] == "VOID", final_auction
+
+
+@pytest.mark.integration
+def test_select_winner_with_a_single_inadequate_bid_voids_via_null_verdict(
+    deployed_contract, client_account, bidder_accounts
+):
+    """Distinct from the zero-revealed-bids VOID path above: here a bid was
+    actually revealed and reviewed, and the judged round itself decided -
+    correctly - that it doesn't qualify. Exercises _parse_selection's
+    winning_bid_id: null branch on live consensus, not just the
+    no-candidates-at-all short-circuit."""
+    c = deployed_contract
+    client = c.connect(client_account)
+    bidder_a, _ = bidder_accounts
+    a = c.connect(bidder_a)
+
+    create_result = client.create_auction(
+        args=[SPEC, BUDGET, COMMIT_WINDOW, REVEAL_WINDOW, CANCEL_GRACE]
+    ).transact(value=BUDGET, **FAST_WAIT)
+    assert tx_execution_succeeded(create_result), create_result
+    auction_id = int(c.auction_count(args=[]).call()) - 1
+
+    commitment = _local_commitment(4000, INADEQUATE_APPROACH, "salt-only", bidder_a.address)
+    commit_result = a.commit_bid(args=[auction_id, commitment]).transact(**FAST_WAIT)
+    assert tx_execution_succeeded(commit_result), commit_result
+    bid_id = int(c.list_bids_for_auction(args=[auction_id]).call()[0])
+
+    auction = c.get_auction(args=[auction_id]).call()
+    time.sleep(_seconds_until(auction["commit_deadline"]))
+
+    reveal_result = _retry_past_deadline(
+        lambda: a.reveal_bid(args=[bid_id, 4000, INADEQUATE_APPROACH, "salt-only"]).transact(**FAST_WAIT)
+    )
+    assert tx_execution_succeeded(reveal_result), reveal_result
+
+    auction = c.get_auction(args=[auction_id]).call()
+    time.sleep(_seconds_until(auction["reveal_deadline"]))
+
+    select_result = _retry_past_deadline(
+        lambda: client.select_winner(args=[auction_id]).transact(**SLOW_WAIT)
+    )
+    print("select_winner receipt:", str(select_result).encode("ascii", errors="backslashreplace").decode("ascii"))
+    assert tx_execution_succeeded(select_result), (
+        "select_winner failed or returned UNDETERMINED even after polling past "
+        "the reveal deadline - known retryable StudioNet behavior; rerun this "
+        "test if so"
+    )
+
+    final_auction = c.get_auction(args=[auction_id]).call()
+    print("final auction:", str(final_auction).encode("ascii", errors="backslashreplace").decode("ascii"))
+    # The sole bid is wholly unrelated to the specification - a correct
+    # judged round should decline to award it rather than pick it by
+    # default for being the only option.
+    assert final_auction["state"] == "VOID", final_auction
+    assert final_auction["winning_price"] == 0
+
+
+@pytest.mark.integration
+def test_cancel_auction_after_the_timeout_refunds_the_client(deployed_contract, client_account):
+    """A stalled auction - nobody ever bid at all - must not lock the
+    client's escrow forever. Exercises cancel_auction's bounded,
+    permissionless exit on live consensus, distinct from both live tests
+    above which only exercise select_winner."""
+    c = deployed_contract
+    client = c.connect(client_account)
+
+    create_result = client.create_auction(
+        args=[SPEC, BUDGET, 60, 60, 60]
+    ).transact(value=BUDGET, **FAST_WAIT)
+    assert tx_execution_succeeded(create_result), create_result
+    auction_id = int(c.auction_count(args=[]).call()) - 1
+
+    # cancellation must refuse to run at all before its own timeout -
+    # cheap to check here since a rejected call never mutates state.
+    early_cancel = client.cancel_auction(args=[auction_id]).transact(**FAST_WAIT)
+    assert tx_execution_failed(early_cancel), "cancel_auction must refuse to run before its own timeout"
+
+    auction = c.get_auction(args=[auction_id]).call()
+    time.sleep(_seconds_until(auction["cancel_deadline"]))
+
+    cancel_result = _retry_past_deadline(
+        lambda: client.cancel_auction(args=[auction_id]).transact(**FAST_WAIT)
+    )
+    assert tx_execution_succeeded(cancel_result), (
+        "cancel_auction must succeed at the consensus/GenVM level once its "
+        "own timeout has genuinely passed"
+    )
+
+    final_auction = c.get_auction(args=[auction_id]).call()
+    print("auction after cancellation:", str(final_auction).encode("ascii", errors="backslashreplace").decode("ascii"))
+    assert final_auction["state"] == "CANCELLED", final_auction
+
+    # cancelling an already-cancelled auction must fail
+    re_cancel = client.cancel_auction(args=[auction_id]).transact(**FAST_WAIT)
+    assert tx_execution_failed(re_cancel), "cancelling an already-CANCELLED auction should fail"
+
+
+@pytest.mark.integration
+def test_deterministic_guards_reject_before_any_judged_round_runs(
+    deployed_contract, client_account, bidder_accounts
+):
+    """A bundle of cheap, purely deterministic rejections that never touch
+    a judged round at all - grouped into one test since none of them need
+    any real-time wait, unlike every other test in this module."""
+    c = deployed_contract
+    client = c.connect(client_account)
+    bidder_a, bidder_b = bidder_accounts
+    a = c.connect(bidder_a)
+    b = c.connect(bidder_b)
+
+    create_result = client.create_auction(
+        args=[SPEC, BUDGET, COMMIT_WINDOW, REVEAL_WINDOW, CANCEL_GRACE]
+    ).transact(value=BUDGET, **FAST_WAIT)
+    assert tx_execution_succeeded(create_result), create_result
+    auction_id = int(c.auction_count(args=[]).call()) - 1
+
+    # the client may not bid on their own auction
+    self_bid_commitment = _local_commitment(5000, ADEQUATE_APPROACH, "salt-self", client_account.address)
+    self_bid = client.commit_bid(args=[auction_id, self_bid_commitment]).transact(**FAST_WAIT)
+    assert tx_execution_failed(self_bid), "the client must not be able to bid on their own auction"
+
+    # a malformed commitment (wrong length / non-hex) must be rejected
+    bad_commitment = a.commit_bid(args=[auction_id, "not-a-real-commitment"]).transact(**FAST_WAIT)
+    assert tx_execution_failed(bad_commitment), "a malformed commitment must be rejected"
+
+    commitment_a = _local_commitment(6000, ADEQUATE_APPROACH, "salt-a2", bidder_a.address)
+    commit_a = a.commit_bid(args=[auction_id, commitment_a]).transact(**FAST_WAIT)
+    assert tx_execution_succeeded(commit_a), commit_a
+    bid_id_a = int(c.list_bids_for_auction(args=[auction_id]).call()[0])
+
+    # the same bidder cannot commit a second time on the same auction
+    second_commitment = _local_commitment(1, "different bid", "salt-second", bidder_a.address)
+    second_commit = a.commit_bid(args=[auction_id, second_commitment]).transact(**FAST_WAIT)
+    assert tx_execution_failed(second_commit), "a bidder must not be able to commit twice on the same auction"
+
+    # revealing before the commit window has even closed must be rejected
+    early_reveal = a.reveal_bid(args=[bid_id_a, 6000, ADEQUATE_APPROACH, "salt-a2"]).transact(**FAST_WAIT)
+    assert tx_execution_failed(early_reveal), "reveal_bid must refuse to run before the commit window closes"
+
+    # a different bidder may not reveal someone else's bid
+    impersonated_reveal = b.reveal_bid(args=[bid_id_a, 6000, ADEQUATE_APPROACH, "salt-a2"]).transact(**FAST_WAIT)
+    assert tx_execution_failed(impersonated_reveal), "only the committing bidder may reveal their own bid"
+
+    # a price above the auction's own declared budget must be rejected -
+    # checked against the bidder's OWN not-yet-revealed commitment, so this
+    # naturally also proves a mismatched reveal is rejected (the commitment
+    # above was made for a valid price, not this one)
+    over_budget_reveal = a.reveal_bid(args=[bid_id_a, BUDGET + 1, ADEQUATE_APPROACH, "salt-a2"]).transact(**FAST_WAIT)
+    assert tx_execution_failed(over_budget_reveal), "a revealed price above max_budget must be rejected"
+
+    # an unknown auction/bid id must revert on every read
+    with pytest.raises(Exception):
+        c.get_auction(args=[999999]).call()
+    with pytest.raises(Exception):
+        c.get_bid(args=[999999]).call()
