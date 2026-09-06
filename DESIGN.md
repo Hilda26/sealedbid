@@ -153,6 +153,71 @@ An auction that cycles `ERRORED` → retried → `ERRORED` again can never show
 a prior attempt's selection as though it still applied - structurally
 unable to go stale, not defended against after the fact.
 
+## 6b. The DriftWatch lesson, checked point by point rather than assumed
+   inapplicable
+
+A later review of DriftWatch found two real gaps: a judged verdict's
+associated payload (its replacement summary) could disagree between
+validators while the verdict itself agreed, and the accepted round
+timestamp was excluded from cross-validator comparison but otherwise left
+completely unconstrained despite controlling a cooldown and permanent
+stored history. Both concerns were checked directly against this contract
+rather than assumed away, since `select_winner`'s judged output has the
+same two-field shape (`winning_bid_id` + `reason`) DriftWatch's did
+(`verdict` + `summary`).
+
+**The payload gap does not apply here, for a structural reason DriftWatch
+didn't have available to it.** DriftWatch's replacement summary *was* the
+thing being stored as new ground truth (`pending_summary`, later adoptable
+as the anchor), sourced entirely from the model's own free text - so an
+unbound summary really could let two validators agree on the verdict while
+disagreeing on what became true. Here, the only value that drives any
+consequence - which bid gets paid, and how much - is `winning_bid_id`,
+which the equivalence principle already binds exactly (validators must
+name the identical `bid_id` or both return `null`), and which
+`_parse_selection` independently re-validates against this auction's own
+`valid_bid_ids` after the round. The paid amount is never taken from
+anything the model writes - it is looked up as `winning_bid.price`,
+already-committed on-chain data from `reveal_bid`, long before this round
+ever ran. There is no path by which the model's own prose could move a
+different amount or a different recipient than what the deterministic bid
+record already fixed, so there is no analogous "agreed verdict, disagreed
+substance" gap to close. `reason` is excluded from equivalence
+deliberately, on purpose, for the same reason `last_reason` (MilestoneEscrow),
+`resolution_reason` (DisputeArbiter, ReputationRegistry) all are: it is
+pure explanatory text no code path ever reads, so requiring validators to
+agree on its exact wording would manufacture spurious disagreement for
+zero safety benefit - unlike DriftWatch's summary, it is not load-bearing.
+
+**The timestamp gap does not apply behaviorally either, but was hardened
+anyway.** `observed_at`/`settled_at` gates nothing in this contract: every
+timing decision that actually controls behavior - `commit_deadline`,
+`reveal_deadline`, `cancel_deadline` - is computed once, deterministically,
+from `create_auction`'s own local clock read at creation, and never changes
+again. `select_winner`'s own eligibility check
+(`state in (OPEN, ERRORED)`) carries no cooldown at all, so nothing ever
+reads `settled_at` to decide whether a later call is allowed. An
+implausible leader-proposed `observed_at` could therefore only ever produce
+a cosmetically wrong `settled_at` value, never a fund-safety or
+availability issue. That said, the fix costs nothing to apply defensively:
+`select_winner` now also rejects a round whose `observed_at` does not fall
+strictly after the auction's own immutable `created_at`, checked against
+already-committed on-chain state rather than any local clock - the same
+shape as DriftWatch's fix, applied here even though nothing in this
+contract's own behavior required it.
+
+Worth being precise rather than overclaiming: given `MIN_WINDOW_SECONDS`
+forces every window to be a positive duration, `select_winner`'s own outer
+gate (`now >= reveal_deadline`, itself always strictly after
+`created_at`) already guarantees this new check can never actually fire
+through the public API today - every validator must independently observe
+that gate passing before any of them ever reaches the judged round, so
+`observed_at` is provably always later than `created_at` by construction.
+The check is retained anyway as a hard invariant rather than leaning on
+that gate alone holding forever (for instance, across a future version
+that ever allowed a zero-length window) - free to check, correct as an
+assertion of intent, and not claimed to be reachable by any test today.
+
 ## 7. Storage layout
 
 ```

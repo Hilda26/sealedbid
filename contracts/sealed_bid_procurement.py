@@ -478,6 +478,21 @@ or
         if not observed_at:
             raise gl.vm.UserError("round did not carry a usable consensus timestamp")
 
+        # observed_at is legitimately excluded from cross-validator
+        # comparison (each validator samples its own clock at its own
+        # moment - see DESIGN.md), but that only means it must not be
+        # COMPARED between validators, not that the single accepted value
+        # is unconstrained. Nothing in this contract gates behavior on it
+        # (unlike DriftWatch's/StructuredDataOracle's cooldowns), so this
+        # is defensive rather than load-bearing, but it costs nothing and
+        # closes the same theoretical gap a review already found
+        # elsewhere in this portfolio: the accepted timestamp can never
+        # precede this auction's own immutable creation time.
+        created_at_dt = _parse_iso(str(a.created_at))
+        observed_dt = _parse_iso(observed_at)
+        if created_at_dt is not None and observed_dt is not None and observed_dt <= created_at_dt:
+            raise gl.vm.UserError("round timestamp did not advance past this auction's creation time")
+
         # The revalidation itself: if cancel_auction already moved this
         # auction out of the state this round started from, that other
         # transaction already wrote the authoritative outcome for it -
