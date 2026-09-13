@@ -105,12 +105,31 @@ def _addr_eq(a, b) -> bool:
     return bytes(a.as_bytes) == bytes(b.as_bytes)
 
 
+def _frame(value: str) -> str:
+    """Netstring-style length-prefixed framing: `str(len(value)) + ":" +
+    value`. A review found that the previous plain colon-joined preimage
+    (`price:approach:salt:bidder`) was ambiguous, since `approach` and
+    `salt` are free text that may themselves contain colons - two
+    genuinely different (approach, salt) pairs could join to the exact
+    same string (e.g. approach="A:B", salt="C" and approach="A",
+    salt="B:C" both join to "...A:B:C..."), meaning a bidder could reveal
+    either interpretation against the same commitment hash. Framing every
+    field with its own length before concatenating closes this
+    completely: given the length prefix, exactly that many characters
+    belong to this field no matter what they contain, so two different
+    field sequences can never concatenate to the same encoded string -
+    the standard fix for this exact class of delimiter-injection bug."""
+    return str(len(value)) + ":" + value
+
+
 def _compute_commitment(price: int, approach: str, salt: str, bidder_hex: str) -> str:
     """Pure, unit-testable: the exact preimage a bidder must reproduce at
     reveal time. Binding the bidder's own address into the preimage stops
     one bidder from replaying another bidder's public commitment as their
-    own before that bidder reveals."""
-    preimage = str(price) + ":" + approach + ":" + salt + ":" + bidder_hex.lower()
+    own before that bidder reveals. Every field is length-prefixed (see
+    _frame) so the preimage uniquely determines the exact field values -
+    never just their colon-joined concatenation."""
+    preimage = _frame(str(price)) + _frame(approach) + _frame(salt) + _frame(bidder_hex.lower())
     return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
 
 

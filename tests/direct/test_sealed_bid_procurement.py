@@ -272,6 +272,58 @@ def test_reveal_bid_rejects_a_mismatched_commitment(direct_deploy, direct_vm, di
 
 
 # ---------------------------------------------------------------------
+# Commitment encoding - a review found that the original colon-joined
+# preimage (f"{price}:{approach}:{salt}:{bidder}") was ambiguous, since
+# approach and salt are free text that may themselves contain colons: two
+# genuinely different (approach, salt) pairs could join to the exact same
+# string, letting a bidder reveal either interpretation against the same
+# commitment. The fix length-prefixes every field before concatenating
+# (see _frame in the contract). These tests prove the fix directly,
+# reconstructing the exact collision the old scheme had and confirming it
+# no longer occurs.
+# ---------------------------------------------------------------------
+
+
+def test_compute_commitment_no_longer_collides_across_a_colon_boundary_shift(
+    direct_deploy, direct_vm, direct_alice
+):
+    """Reconstructs the exact vulnerability the review described: under
+    the old plain colon-joined preimage, approach="A:B", salt="C" and
+    approach="A", salt="B:C" both joined to the identical string
+    "...A:B:C..." - two genuinely different (approach, salt) pairs
+    producing the same hash. With length-prefixed framing they must now
+    differ."""
+    c = _deploy(direct_deploy, direct_vm, direct_alice)
+    bidder_hex = _addr_hex(direct_alice)
+
+    commitment_a = c.compute_commitment(5000, "A:B", "C", bidder_hex)
+    commitment_b = c.compute_commitment(5000, "A", "B:C", bidder_hex)
+    assert commitment_a != commitment_b
+
+
+def test_reveal_bid_rejects_the_colliding_alternate_interpretation_of_a_committed_colon(
+    direct_deploy, direct_vm, direct_alice, direct_bob
+):
+    """End-to-end proof, not just the isolated hash function: a bidder who
+    committed to approach="A:B", salt="C" cannot reveal the OLD scheme's
+    colliding alternate interpretation (approach="A", salt="B:C") - it
+    must be rejected as a mismatched commitment, exactly as any other
+    wrong reveal would be."""
+    c = _deploy(direct_deploy, direct_vm, direct_alice)
+    auction_id = _create_auction(c, direct_vm, direct_alice)
+    bid_id = _commit(c, direct_vm, direct_bob, auction_id, 5000, "A:B", "C")
+    _warp_past_commit_deadline(direct_vm, c, auction_id)
+    with direct_vm.expect_revert("do not match the original commitment"):
+        _reveal(c, direct_vm, direct_bob, bid_id, 5000, "A", "B:C")
+
+    # the true, originally-committed values still reveal correctly
+    _reveal(c, direct_vm, direct_bob, bid_id, 5000, "A:B", "C")
+    b = c.get_bid(bid_id)
+    assert b["revealed"] is True
+    assert b["approach"] == "A:B"
+
+
+# ---------------------------------------------------------------------
 # select_winner - the judged path
 # ---------------------------------------------------------------------
 

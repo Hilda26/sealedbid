@@ -83,7 +83,8 @@ can never lock the client's funds forever. Full rationale in `DESIGN.md`.
 |---|---|---|
 | A bid's price and approach are provably hidden from every other bidder until its own bidder reveals them | `commit_bid` stores only a `sha256` hash; `reveal_bid` is a pure hash-equality check against that commitment | `test_reveal_bid_succeeds_with_the_exact_committed_values`, `test_reveal_bid_rejects_a_mismatched_commitment` |
 | The full escrow is collected up front, before any bid is even accepted | `create_auction` requires `msg.value` to exactly equal `max_budget` | `test_create_auction_rejects_value_not_matching_budget` |
-| One bidder cannot claim another's already-published commitment as their own | the commitment preimage binds the bidder's own address (`price:approach:salt:bidder_hex`) | `test_reveal_bid_rejects_non_bidder` |
+| One bidder cannot claim another's already-published commitment as their own | the commitment preimage binds the bidder's own address, length-prefixed alongside every other field | `test_reveal_bid_rejects_non_bidder` |
+| A commitment uniquely determines the exact `(price, approach, salt)` that was committed - no two different tuples can ever hash to the same commitment, even when `approach`/`salt` contain colons | every preimage field is netstring-framed (`str(len(value)) + ":" + value`) before concatenation, so field boundaries are read positionally from a stated length, never searched for a delimiter that could appear inside a field | `test_compute_commitment_no_longer_collides_across_a_colon_boundary_shift`, `test_reveal_bid_rejects_the_colliding_alternate_interpretation_of_a_committed_colon` - both reconstruct the exact collision a review found in the original colon-joined preimage |
 | A revealed price can never exceed the auction's own declared budget | `reveal_bid` checks `price <= max_budget` deterministically, before any judged round | `test_reveal_bid_rejects_price_above_the_budget` |
 | A selection never names a winner outside this specific auction's own revealed bids | `_parse_selection` accepts only `null` or a `bid_id` present in this auction's own revealed set | `test_select_winner_rejects_a_winning_bid_id_that_was_never_revealed` |
 | Zero revealed bids never stalls the auction - the client is refunded automatically | a deterministic short-circuit in `select_winner`, spending no non-determinism budget at all | `test_select_winner_with_zero_revealed_bids_voids_and_refunds_the_client_in_full` |
@@ -121,13 +122,14 @@ meaningful. `DESIGN.md` §8 and the example's own tests document this explicitly
 
 ## Testing
 
-- **Direct-mode** (`tests/direct/`, `pytest tests/direct/`): 39 tests, no network, no
+- **Direct-mode** (`tests/direct/`, `pytest tests/direct/`): 41 tests, no network, no
   live consensus - every deterministic branch of the commit-reveal state machine, every
   failure/abstention path on the judged selection round, the max-bidders cap, both
   bounded-exit and mid-flight revalidation behavior, fund conservation across the full
-  lifecycle, and the worked consumer example (including the placeholder-winner case it
-  exists to catch), using gltest's built-in `mock_llm` plus a real-balance-moving
-  `EthSend` hook.
+  lifecycle, the commitment-encoding fix (reconstructing the exact colon-collision a
+  review found and confirming it no longer occurs), and the worked consumer example
+  (including the placeholder-winner case it exists to catch), using gltest's built-in
+  `mock_llm` plus a real-balance-moving `EthSend` hook.
 - **Integration** (`tests/integration/`, `pytest tests/integration/ --network=studionet`):
   5 tests, requires `SEALEDBIDPROCUREMENT_ADDRESS` set to a real StudioNet deployment -
   a full create → commit → reveal → select lifecycle with multiple competing bids; the
@@ -138,11 +140,34 @@ meaningful. `DESIGN.md` §8 and the example's own tests document this explicitly
   commit, an impersonated reveal, an over-budget reveal, unknown ids) that need no
   real-time wait at all.
 
+## A review found the commitment preimage was ambiguous
+
+> The auction lifecycle and winner consensus are substantive, but the commitment does
+> not uniquely bind the revealed approach. Because both approach and salt may contain
+> colons, different approach/salt pairs can produce the same hashed preimage, allowing
+> an approach to change after commitment. Please use an unambiguous encoding such as
+> canonical JSON or length-prefixed fields (and add a regression test), then provide
+> matching updated source and deployment.
+
+Real, and fixed exactly as suggested: the original preimage joined fields with plain
+colons, and since `approach`/`salt` are free text a bidder controls, two genuinely
+different pairs could join to the identical string (`approach="A:B", salt="C"` and
+`approach="A", salt="B:C"` both produce `"...A:B:C..."`). Every field is now
+length-prefixed (netstring-style: `str(len(value)) + ":" + value`) before
+concatenation, so field boundaries are read positionally from a stated length rather
+than searched for a delimiter that could appear inside a field - no two different
+`(price, approach, salt, bidder)` tuples can ever produce the same commitment. Full
+rationale in `DESIGN.md` §3a, verified by reconstructing the exact collision
+(`test_compute_commitment_no_longer_collides_across_a_colon_boundary_shift`) and by
+confirming it's rejected end-to-end through the real `reveal_bid` path
+(`test_reveal_bid_rejects_the_colliding_alternate_interpretation_of_a_committed_colon`).
+
 ## Deployment
 
-- Deployed StudioNet address: `0x9B6242123298fbc8172e53aC1d535608503c905C` (redeployed
-  2026-09-06 as a pre-submission self-audit against two rejections received on other
-  contracts in this portfolio — see "A pre-submission self-audit" below. Supersedes
+- Deployed StudioNet address: `0x5A9acD81B2304fb215eA4c2C72cD567c4C8e3cff` (redeployed
+  2026-09-13 for the commitment-encoding fix — see "A review found the commitment
+  preimage was ambiguous" above. Supersedes
+  `0x9B6242123298fbc8172e53aC1d535608503c905C` and
   `0xf80e9219135947eFC7e240bFE39E2B938FFF0B70`.)
 - Studio import: open [studio.genlayer.com](https://studio.genlayer.com) → "Import
   contract" → paste the address above.

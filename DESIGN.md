@@ -48,13 +48,13 @@ chooses to reveal it - the entire point of sealing.
   comparison against the bidder's own prior commitment, with no model
   involved. A revealed price above the declared `max_budget` is rejected
   deterministically before it ever reaches a judged round.
-- Binding the bidder's own address into the commitment preimage
-  (`price:approach:salt:bidder_hex`) - without it, a bidder could copy
-  another bidder's published commitment hash verbatim as their own,
-  effectively "front-running" a bid whose contents they haven't actually
-  seen (since the commitment alone reveals nothing) but could still cause
-  ambiguity about who is entitled to reveal which values. Binding the
-  address makes each commitment only revealable by the bidder who made it.
+- Binding the bidder's own address into the commitment preimage - without
+  it, a bidder could copy another bidder's published commitment hash
+  verbatim as their own, effectively "front-running" a bid whose contents
+  they haven't actually seen (since the commitment alone reveals nothing)
+  but could still cause ambiguity about who is entitled to reveal which
+  values. Binding the address makes each commitment only revealable by the
+  bidder who made it. See §3a for how the preimage itself is built.
 - Output sanitization: `_parse_selection` accepts only a `winning_bid_id`
   that is `null` or one of *this specific auction's* own revealed bid ids -
   a hallucinated or reused id from anywhere else is rejected outright, the
@@ -64,6 +64,58 @@ chooses to reveal it - the entire point of sealing.
   moves to exactly that bid's own already-committed bidder, and exactly the
   remainder moves back to the already-named client. The model is never asked
   "how much" or "to whom" - only "which bid_id, if any."
+
+## 3a. A review found the commitment preimage was ambiguous, not just hidden
+
+> The commitment does not uniquely bind the revealed approach. Because both approach
+> and salt may contain colons, different approach/salt pairs can produce the same
+> hashed preimage, allowing an approach to change after commitment.
+
+Real, and precisely the classic delimiter-injection bug. The original preimage joined
+fields with plain colons: `f"{price}:{approach}:{salt}:{bidder_hex}"`. Since `approach`
+and `salt` are free text a bidder controls, two genuinely *different* pairs could join
+to the *identical* string - `approach="A:B", salt="C"` and `approach="A", salt="B:C"`
+both produce `"...A:B:C..."`. The commitment hash was therefore never a unique
+fingerprint of `(price, approach, salt, bidder)` - it was a fingerprint of the joined
+string, and multiple distinct tuples can share one. A bidder exploiting this would not
+be "changing their approach after commitment" in the sense of revealing something with
+no prior commitment at all (the hash still has to match *some* valid split), but they
+would have genuine latitude over which of several colliding interpretations to reveal -
+already a real violation of "the commitment uniquely determines what was committed,"
+which is the entire point of a commit-reveal scheme.
+
+**Fix: length-prefixed (netstring-style) framing**, exactly one of the two remedies the
+review named:
+
+```python
+def _frame(value: str) -> str:
+    return str(len(value)) + ":" + value
+
+def _compute_commitment(price: int, approach: str, salt: str, bidder_hex: str) -> str:
+    preimage = _frame(str(price)) + _frame(approach) + _frame(salt) + _frame(bidder_hex.lower())
+    return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
+```
+
+This closes the ambiguity completely, not approximately: given a length prefix, exactly
+that many characters belong to that field regardless of what they contain - no
+delimiter inside a field can ever be mistaken for a field boundary, because boundaries
+are never located by *searching* for a delimiter, they are read positionally from the
+stated length. Two different `(price, approach, salt, bidder_hex)` tuples can never
+produce the same framed string; canonical JSON (the review's other suggested option)
+would have the identical property but adds a JSON-serialization dependency and its own
+canonicalization subtleties (key ordering, number formatting) this simpler scheme
+avoids entirely.
+
+**Verified by reconstructing the exact collision, not just asserting the fix in the
+abstract.** `test_compute_commitment_no_longer_collides_across_a_colon_boundary_shift`
+computes `compute_commitment(5000, "A:B", "C", addr)` and
+`compute_commitment(5000, "A", "B:C", addr)` - the exact pair that collided under the
+old scheme - and confirms they now differ.
+`test_reveal_bid_rejects_the_colliding_alternate_interpretation_of_a_committed_colon`
+proves it end to end through the real `reveal_bid` path: a bidder who committed to
+`approach="A:B", salt="C"` cannot reveal the colliding alternate
+(`approach="A", salt="B:C"`) - it is rejected as a mismatched commitment - while the
+true, originally-committed values still reveal correctly.
 
 ## 4. Time: exactly one consensus-bound value, never a local wall-clock read
    inside a judged method

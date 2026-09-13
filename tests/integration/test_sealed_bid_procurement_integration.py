@@ -86,15 +86,22 @@ def _retry_past_deadline(attempt):
     return result
 
 
+def _frame(value: str) -> str:
+    return str(len(value)) + ":" + value
+
+
 def _local_commitment(price: int, approach: str, salt: str, bidder_hex: str) -> str:
     """Computed locally rather than via the contract's own compute_commitment
     view: gen_call has a known encoding limit on longer string arguments
     (confirmed separately - short approach text round-trips fine, ~400
     chars fails with an RLP/list-length decoding error at the RPC layer),
     and a real bidder would compute this client-side anyway rather than
-    depend on an on-chain convenience view. Must match
-    _compute_commitment in contracts/sealed_bid_procurement.py exactly."""
-    preimage = str(price) + ":" + approach + ":" + salt + ":" + bidder_hex.lower()
+    depend on an on-chain convenience view. Must match _compute_commitment
+    / _frame in contracts/sealed_bid_procurement.py exactly - including
+    the length-prefixed framing fix a review required, which this mirror
+    was missed on once already (caught by this exact test run failing
+    with a mismatched-commitment error until fixed here)."""
+    preimage = _frame(str(price)) + _frame(approach) + _frame(salt) + _frame(bidder_hex.lower())
     return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
 
 
